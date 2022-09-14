@@ -38,31 +38,32 @@ class Base_RCLP(abc.ABC):
         Returns
         -------
         params_dict: dictionary
-            Dictionary with parameters
+            Dictionary with parameters. At minimum, includes the weights 'w' for
+            the linear pool
         """
     
     
     @abc.abstractmethod
-    def ens_log_f(self, log_f, log_F):
+    def log_g(self, lp_F, **kwargs):
         """
-        Calculate the log density of an ensemble forecast
+        Calculate the log density of a recalibrating transformation for an
+        ensemble forecast. This should correspond to a distribution with support
+        on the interval [0, 1].
         
         Parameters
         ----------
-        log_f: 2D tensor with shape (N, M)
-            Component log pdf values for observation cases i = 1, ..., N,
-            models m = 1, ..., M
-        log_F: 2D tensor with shape (N, M)
-            Component log cdf values for observation cases i = 1, ..., N,
-            models m = 1, ..., M
-        additional parameters as specified by the concrete implementation,
+        lp_F: 1D tensor with length N
+            cdf values from the linear pool for observation cases i = 1, ..., N
+        **kwargs: dictionary
+            additional parameters as specified by the concrete implementation,
             including model parameters needed to construct the ensemble as
             returned by unpack_params
         
         Returns
         -------
-        ens_log_f: 1D tensor of length N
-            Ensemble log pdf value for each observation case i = 1, ..., N
+        1D tensor of length N
+            log recalibration density evaluated at the linear pool cdf values
+            for each observation case i = 1, ..., N
         """
     
     
@@ -85,9 +86,24 @@ class Base_RCLP(abc.ABC):
         -------
         Total log score over all predictions as scalar tensor
         """
-        ens_log_f = self.ens_log_f(log_f=log_f, log_F=log_F,
-                                   **self.unpack_params(param_vec))
+        # unpack parameters from vector of real numbers to dictionary of
+        # appropriately constrained parameter values
+        param_dict = self.unpack_params(param_vec)
+        w = param_dict.pop('w')
         
+        # adjust log_f, log_F, and w to handle missing values
+        log_f, log_F, w = util.handle_missingness(log_f=log_f, log_F=log_F, w=w)
+        
+        # log_f and log_F for linear pool
+        lp_log_f = tf.reduce_logsumexp(log_f + tf.math.log(w), axis=1)
+        lp_log_F = tf.reduce_logsumexp(log_F + tf.math.log(w), axis=1)
+        
+        # log probability for recalibrated linear pool
+        # log[f(y)] = log[ g{ \sum_{m=1}^M \pi_m F_{m,i}(y); \theta } ]
+        #              + log[ \sum_{m=1}^M \pi_m f_{m,i}(y) ]
+        ens_log_f = self.log_g(lp_F=tf.math.exp(lp_log_F), **param_dict) + lp_log_f
+        
+        # sum across observation indices i = 1, ..., N
         return -tf.reduce_sum(ens_log_f)
     
     
@@ -116,9 +132,9 @@ class Base_RCLP(abc.ABC):
     def fit(self,
             log_f,
             log_F,
-            optim_method,
-            num_iter,
-            learning_rate,
+            optim_method = "adam",
+            num_iter = 100,
+            learning_rate = 0.1,
             init_param_vec = None,
             verbose = False,
             save_frequency = None,
@@ -175,7 +191,7 @@ class Base_RCLP(abc.ABC):
         # create a list of trainable variables
         trainable_variables = [params_vec_var]
 
-        # apply gradient descent with num_iter times
+        # apply gradient descent num_iter times
         for i in range(num_iter):
             with tf.GradientTape() as tape:
                 loss = self.log_score_objective(param_vec=params_vec_var,
@@ -259,32 +275,25 @@ class LinearPool(Base_RCLP):
         return { 'w': tfb.SoftmaxCentered().forward(param_vec) }
     
     
-    def ens_log_f(self, log_f, log_F, w):
+    def log_g(self, lp_F):
         """
-        Calculate the log density of an ensemble forecast
+        Calculate the log density of a recalibrating transformation for an
+        ensemble forecast. For a linear pool, no recalibration is done. This
+        corresponds to the use of a Uniform(0, 1) distribution with log
+        density that takes the value 0 everywhere.
         
         Parameters
         ----------
-        log_f: 2D tensor with shape (N, M)
-            Component log pdf values for observation cases i = 1, ..., N,
-            models m = 1, ..., M
-        log_F: 2D tensor with shape (N, M)
-            Component log cdf values for observation cases i = 1, ..., N,
-            models m = 1, ..., M
-        w: 2D tensor with shape (N, M)
-            Component model weights, where `w[i, k]` is the weight given to
-            model m for observation case i
-        kwargs: ignored keyword arguments (in particular, log_F is not used)
+        lp_F: 1D tensor with length N
+            cdf values from the linear pool for observation cases i = 1, ..., N
         
         Returns
         -------
-        ens_log_f: 1D tensor of length N
-            Ensemble log pdf value for each observation case i = 1, ..., N
+        1D tensor of length N
+            log recalibration density evaluated at the linear pool cdf values
+            for each observation case i = 1, ..., N
         """
-        # adjust w and q to handle missing values
-        log_f, log_F, w = util.handle_missingness(log_f=log_f, log_F=log_F, w=w)
         
-        return tf.reduce_logsumexp(log_f + tf.math.log(w), axis=1)
-        
+        return tf.zeros_like(lp_F)
 
 
