@@ -15,15 +15,6 @@ class Base_RCLP(abc.ABC):
     Base class for a recalibrated linear pool, with estimation by optimizing
     log score.
     """
-    @property
-    @abc.abstractmethod
-    def n_param(self):
-        """
-        Abstract property for number of free parameters of an ensemble model
-        """
-        pass
-    
-    
     @abc.abstractmethod
     def unpack_params(self, param_vec):
         """
@@ -67,6 +58,58 @@ class Base_RCLP(abc.ABC):
         """
     
     
+    @property
+    def n_param(self):
+        """
+        Set number of parameters based on kernel and number of features
+        """
+        return self._n_param
+    
+    
+    @n_param.setter
+    def n_param(self, value):
+        self._n_param = value
+    
+    
+    def ens_log_f(self, param_vec, log_f, log_F):
+        """
+        Log pdf of ensemble
+        
+        Parameters
+        ----------
+        param_vec: 1D tensor of length self.n_param
+            parameters vector
+        log_f: 2D tensor with shape (N, M)
+            Component log pdf values for observation cases i = 1, ..., N,
+            models m = 1, ..., M
+        log_F: 2D tensor with shape (N, M)
+            Component log cdf values for observation cases i = 1, ..., N,
+            models m = 1, ..., M
+        
+        Returns
+        -------
+        Log of ensemble pdf for all observation cases as a tensor of length N
+        """
+        # unpack parameters from vector of real numbers to dictionary of
+        # appropriately constrained parameter values
+        param_dict = self.unpack_params(param_vec)
+        w = param_dict.pop('w')
+        
+        # adjust log_f, log_F, and w to handle missing values
+        log_f, log_F, w = util.handle_missingness(log_f=log_f, log_F=log_F, w=w)
+        
+        # log_f and log_F for linear pool
+        lp_log_f = tf.reduce_logsumexp(log_f + tf.math.log(w), axis=1)
+        lp_log_F = tf.reduce_logsumexp(log_F + tf.math.log(w), axis=1)
+        
+        # log probability for recalibrated linear pool
+        # log[f(y)] = log[ g{ \sum_{m=1}^M \pi_m F_{m,i}(y); \theta } ]
+        #              + log[ \sum_{m=1}^M \pi_m f_{m,i}(y) ]
+        ens_log_f = self.log_g(lp_F=tf.math.exp(lp_log_F), **param_dict) + lp_log_f
+        
+        return ens_log_f
+    
+    
     def log_score_objective(self, param_vec, log_f, log_F):
         """
         Log score objective function for use during parameter estimation
@@ -86,25 +129,8 @@ class Base_RCLP(abc.ABC):
         -------
         Total log score over all predictions as scalar tensor
         """
-        # unpack parameters from vector of real numbers to dictionary of
-        # appropriately constrained parameter values
-        param_dict = self.unpack_params(param_vec)
-        w = param_dict.pop('w')
-        
-        # adjust log_f, log_F, and w to handle missing values
-        log_f, log_F, w = util.handle_missingness(log_f=log_f, log_F=log_F, w=w)
-        
-        # log_f and log_F for linear pool
-        lp_log_f = tf.reduce_logsumexp(log_f + tf.math.log(w), axis=1)
-        lp_log_F = tf.reduce_logsumexp(log_F + tf.math.log(w), axis=1)
-        
-        # log probability for recalibrated linear pool
-        # log[f(y)] = log[ g{ \sum_{m=1}^M \pi_m F_{m,i}(y); \theta } ]
-        #              + log[ \sum_{m=1}^M \pi_m f_{m,i}(y) ]
-        ens_log_f = self.log_g(lp_F=tf.math.exp(lp_log_F), **param_dict) + lp_log_f
-        
-        # sum across observation indices i = 1, ..., N
-        return -tf.reduce_sum(ens_log_f)
+        # sum ensemble log pdf values across observation indices i = 1, ..., N
+        return -tf.reduce_sum(self.ens_log_f(param_vec, log_f, log_F))
     
     
     def get_param_estimates_vec(self):
@@ -225,6 +251,75 @@ class Base_RCLP(abc.ABC):
 
 
 
+class Beta_RCLP(Base_RCLP):
+    def __init__(self, M) -> None:
+        """
+        Initialize a beta re-calibrated linear pool model
+        
+        Parameters
+        ----------
+        M: integer
+            number of component models
+        
+        Returns
+        -------
+        None
+        """
+        self.n_param = int(M - 1 + 2)
+        
+        super(Beta_RCLP, self).__init__()
+    
+    
+    def unpack_params(self, param_vec):
+        """
+        Convert from a vector of parameters to a dictionary of parameter values
+        suitable for use in a call to self.ens_log_f
+        
+        Parameters
+        ----------
+        param_vec: 1D tensor of length self.n_param
+            vector of parameters on the scale of unconstrained real numbers
+        
+        Returns
+        -------
+        params_dict: dictionary
+            Dictionary with parameters
+        """
+        return {
+            'w': tfb.SoftmaxCentered().forward(param_vec[:-2]),
+            'alpha': tfb.Softplus().forward(param_vec[-2]),
+            'beta': tfb.Softplus().forward(param_vec[-1])
+        }
+    
+    
+    def log_g(self, lp_F, alpha, beta):
+        """
+        Calculate the log density of a recalibrating transformation for an
+        ensemble forecast. For a beta recalibrated linear pool, the
+        recalibrating transformation corresponds to a Beta(alpha, beta)
+        distribution.
+        
+        Parameters
+        ----------
+        lp_F: 1D tensor with length N
+            cdf values from the linear pool for observation cases i = 1, ..., N
+        alpha: scalar
+            first shape parameter of Beta distribution
+        beta: scalar
+            second shape parameter of Beta distribution
+        
+        Returns
+        -------
+        1D tensor of length N
+            log recalibration density evaluated at the linear pool cdf values
+            for each observation case i = 1, ..., N
+        """
+        # note that we transform lp_F away from 0 and 1 to avoid numeric issues
+        # at the boundary of the support of the Beta distribution
+        return tfd.Beta(alpha, beta).log_prob(lp_F * 0.99999 + 0.000005)
+
+
+
 class LinearPool(Base_RCLP):
     def __init__(self, M) -> None:
         """
@@ -242,19 +337,6 @@ class LinearPool(Base_RCLP):
         self.n_param = int(M - 1)
         
         super(LinearPool, self).__init__()
-    
-    
-    @property
-    def n_param(self):
-        """
-        Set number of parameters based on kernel and number of features
-        """
-        return self._n_param
-    
-    
-    @n_param.setter
-    def n_param(self, value):
-        self._n_param = value
     
     
     def unpack_params(self, param_vec):
