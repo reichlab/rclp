@@ -196,8 +196,13 @@ class Base_RCLP(abc.ABC):
             save_frequency = num_iter + 1
         
         if init_param_vec == None:
-            # create a 0 vector of length equal to the number of free parameters
-            init_param_vec = tf.constant(np.zeros(self.n_param), dtype=tf.float32)
+            # Xavier weight initialization
+            # weight ~ Unif(-1/sqrt(n_param), 1/sqrt(n_param))
+            xavier_half_width = 1.0 / tf.math.sqrt(tf.constant(self.n_param,
+                                                               dtype=tf.float32))
+            init_param_vec = tf.random.uniform((self.n_param,),
+                                               -xavier_half_width,
+                                               xavier_half_width)
         
         # declare variable representing parameters to estimate
         params_vec_var = tf.Variable(
