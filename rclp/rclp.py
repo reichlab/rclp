@@ -15,23 +15,59 @@ class Base_RCLP(abc.ABC):
     Base class for a recalibrated linear pool, with estimation by optimizing
     log score.
     """
-    @abc.abstractmethod
-    def unpack_params(self, param_vec):
+    def __init__(self, M, rc_parameters={}) -> None:
         """
-        Convert from a vector of parameters to a dictionary of parameter values
-        suitable for use in a call to self.ens_log_f
+        Initialize a Base_RCLP model
         
         Parameters
         ----------
-        param_vec: 1D tensor of length self.n_param
-            vector of parameters on the scale of unconstrained real numbers
+        M: integer
+            number of component models
+        rc_parameters: dictionary
+            parameters for recalibration
         
         Returns
         -------
-        params_dict: dictionary
-            Dictionary with parameters. At minimum, includes the weights 'w' for
-            the linear pool
+        None
         """
+        softmax_bijector = tfb.SoftmaxCentered()
+        
+        w_xavier_hw = 1.0 / tf.math.sqrt(tf.constant(M-1, dtype=tf.float32))
+        def init_w():
+            return softmax_bijector.forward(
+                tf.random.uniform((M-1,), -w_xavier_hw, w_xavier_hw))
+        
+        rc_parameters.update({
+            'w': {
+                'init': init_w,
+                'bijector': softmax_bijector
+            }
+        })
+        self._parameter_defs = rc_parameters
+        
+        # dictionary of transformed variables for ensemble parameters
+        self.parameters = {
+            param_name: tfp.util.TransformedVariable(
+                initial_value=param_config['init'](),
+                bijector=param_config['bijector'],
+                name=param_name,
+                dtype=np.float32
+            ) \
+                for param_name, param_config in self._parameter_defs.items()
+        }
+    
+    
+    @property
+    def parameters(self):
+        """
+        Dictionary of ensemble model parameters
+        """
+        return self._parameters
+    
+    
+    @parameters.setter
+    def parameters(self, value):
+        self._parameters = value
     
     
     @abc.abstractmethod
@@ -58,27 +94,12 @@ class Base_RCLP(abc.ABC):
         """
     
     
-    @property
-    def n_param(self):
-        """
-        Set number of parameters based on kernel and number of features
-        """
-        return self._n_param
-    
-    
-    @n_param.setter
-    def n_param(self, value):
-        self._n_param = value
-    
-    
-    def ens_log_f(self, param_vec, log_f, log_F):
+    def ens_log_f(self, log_f, log_F):
         """
         Log pdf of ensemble
         
         Parameters
         ----------
-        param_vec: 1D tensor of length self.n_param
-            parameters vector
         log_f: 2D tensor with shape (N, M)
             Component log pdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
@@ -90,10 +111,10 @@ class Base_RCLP(abc.ABC):
         -------
         Log of ensemble pdf for all observation cases as a tensor of length N
         """
-        # unpack parameters from vector of real numbers to dictionary of
-        # appropriately constrained parameter values
-        param_dict = self.unpack_params(param_vec)
-        w = param_dict.pop('w')
+        # separately extract parameters for the linear pool (just 'w')
+        # and parameters for recalibration (all other than 'w')
+        w = self.parameters['w']
+        rc_parameters = {k: v for k,v in self.parameters.items() if k != 'w'}
         
         # adjust log_f, log_F, and w to handle missing values
         log_f, log_F, w = util.handle_missingness(log_f=log_f, log_F=log_F, w=w)
@@ -105,12 +126,13 @@ class Base_RCLP(abc.ABC):
         # log probability for recalibrated linear pool
         # log[f(y)] = log[ g{ \sum_{m=1}^M \pi_m F_{m,i}(y); \theta } ]
         #              + log[ \sum_{m=1}^M \pi_m f_{m,i}(y) ]
-        ens_log_f = self.log_g(lp_F=tf.math.exp(lp_log_F), **param_dict) + lp_log_f
+        ens_log_f = self.log_g(lp_F=tf.math.exp(lp_log_F), **rc_parameters) + \
+            lp_log_f
         
         return ens_log_f
     
     
-    def log_score_objective(self, param_vec, log_f, log_F):
+    def log_score_objective(self, log_f, log_F):
         """
         Log score objective function for use during parameter estimation
         
@@ -129,30 +151,9 @@ class Base_RCLP(abc.ABC):
         -------
         Total log score over all predictions as scalar tensor
         """
-        # sum ensemble log pdf values across observation indices i = 1, ..., N
-        return -tf.reduce_sum(self.ens_log_f(param_vec, log_f, log_F))
-    
-    
-    def get_param_estimates_vec(self):
-        """
-        Get parameter estimates in vector form 
-        
-        Returns
-        ----------
-        param_estimates_vec: 1D tensor of length self.n_param
-        """
-        return self._param_estimates_vec
-    
-    
-    def set_param_estimates_vec(self, param_estimates_vec):
-        """
-        Set parameter estimates in vector form
-        
-        Parameters
-        ----------
-        param_estimates_vec: 1D tensor of length self.n_param
-        """
-        self._param_estimates_vec = param_estimates_vec
+        # negative sum of ensemble log pdf values across
+        # observation indices i = 1, ..., N
+        return -tf.reduce_sum(self.ens_log_f(log_f, log_F))
     
     
     def fit(self,
@@ -161,7 +162,6 @@ class Base_RCLP(abc.ABC):
             optim_method = "adam",
             num_iter = 100,
             learning_rate = 0.1,
-            init_param_vec = None,
             verbose = False,
             save_frequency = None,
             save_path = None):
@@ -195,21 +195,6 @@ class Base_RCLP(abc.ABC):
         if save_frequency == None:
             save_frequency = num_iter + 1
         
-        if init_param_vec == None:
-            # Xavier weight initialization
-            # weight ~ Unif(-1/sqrt(n_param), 1/sqrt(n_param))
-            xavier_half_width = 1.0 / tf.math.sqrt(tf.constant(self.n_param,
-                                                               dtype=tf.float32))
-            init_param_vec = tf.random.uniform((self.n_param,),
-                                               -xavier_half_width,
-                                               xavier_half_width)
-        
-        # declare variable representing parameters to estimate
-        params_vec_var = tf.Variable(
-            initial_value=init_param_vec,
-            name='params_vec',
-            dtype=np.float32)
-        
         # create optimizer
         if optim_method == "adam":
             optimizer = tf.optimizers.Adam(learning_rate = learning_rate)
@@ -219,23 +204,23 @@ class Base_RCLP(abc.ABC):
         # initiate loss trace
         lls_ = np.zeros(num_iter, np.float32)
         
-        # create a list of trainable variables
-        trainable_variables = [params_vec_var]
-
+        # list of trainable variables for which to calculate gradient
+        trainable_variables = [self.parameters[v].trainable_variables[0] \
+            for v in self.parameters.keys()]
+        
         # apply gradient descent num_iter times
         for i in range(num_iter):
             with tf.GradientTape() as tape:
-                loss = self.log_score_objective(param_vec=params_vec_var,
-                                                log_f=log_f, log_F=log_F)
+                loss = self.log_score_objective(log_f=log_f, log_F=log_F)
             grads = tape.gradient(loss, trainable_variables)
             grads, _ = tf.clip_by_global_norm(grads, 10.0)
             optimizer.apply_gradients(zip(grads, trainable_variables))
             lls_[i] = loss
-
+            
             if verbose:
                 print(i)
-                print("param estimates vec = ")
-                print(params_vec_var.numpy())
+                print("param estimates = ")
+                print(self.parameters)
                 print("loss = ")
                 print(loss.numpy())
                 print("grads = ")
@@ -244,14 +229,14 @@ class Base_RCLP(abc.ABC):
             if (i + 1) % save_frequency == 0:
                 # save parameter estimates and loss trace
                 params_to_save = {
-                    'param_estimates_vec': params_vec_var.numpy(),
+                    'param_estimates': { k: v.numpy() for k,v in self.parameters.items() },
                     'loss_trace': lls_
                 }
-    
+                
                 pickle.dump(params_to_save, open(str(save_path), "wb"))
-
+        
         # set parameter estimates
-        self.set_param_estimates_vec(params_vec_var.numpy())
+        # self.set_param_estimates_vec(params_vec_var.numpy())
         self.loss_trace = lls_
 
 
@@ -270,31 +255,23 @@ class Beta_RCLP(Base_RCLP):
         -------
         None
         """
-        self.n_param = int(M - 1 + 2)
+        softplus_bijector = tfb.Softplus()
+        def init_alpha_beta():
+            return softplus_bijector.forward(
+                tf.random.normal((1,)))
         
-        super(Beta_RCLP, self).__init__()
-    
-    
-    def unpack_params(self, param_vec):
-        """
-        Convert from a vector of parameters to a dictionary of parameter values
-        suitable for use in a call to self.ens_log_f
-        
-        Parameters
-        ----------
-        param_vec: 1D tensor of length self.n_param
-            vector of parameters on the scale of unconstrained real numbers
-        
-        Returns
-        -------
-        params_dict: dictionary
-            Dictionary with parameters
-        """
-        return {
-            'w': tfb.SoftmaxCentered().forward(param_vec[:-2]),
-            'alpha': tfb.Softplus().forward(param_vec[-2]),
-            'beta': tfb.Softplus().forward(param_vec[-1])
+        rc_parameters = {
+            'alpha': {
+                'init': init_alpha_beta,
+                'bijector': softplus_bijector
+            },
+            'beta': {
+                'init': init_alpha_beta,
+                'bijector': softplus_bijector
+            }
         }
+        
+        super(Beta_RCLP, self).__init__(M=M, rc_parameters=rc_parameters)
     
     
     def log_g(self, lp_F, alpha, beta):
@@ -339,27 +316,7 @@ class LinearPool(Base_RCLP):
         -------
         None
         """
-        self.n_param = int(M - 1)
-        
-        super(LinearPool, self).__init__()
-    
-    
-    def unpack_params(self, param_vec):
-        """
-        Convert from a vector of parameters to a dictionary of parameter values
-        suitable for use in a call to self.ens_log_f
-        
-        Parameters
-        ----------
-        param_vec: 1D tensor of length self.n_param
-            vector of parameters on the scale of unconstrained real numbers
-        
-        Returns
-        -------
-        params_dict: dictionary
-            Dictionary with parameters
-        """
-        return { 'w': tfb.SoftmaxCentered().forward(param_vec) }
+        super(LinearPool, self).__init__(M=M, rc_parameters={})
     
     
     def log_g(self, lp_F):
@@ -382,5 +339,3 @@ class LinearPool(Base_RCLP):
         """
         
         return tf.zeros_like(lp_F)
-
-
