@@ -59,4 +59,4 @@ def handle_missingness(component_log_prob, component_log_cdf, w):
                                                np.float32(0.0),
                                                np.float32(component_log_cdf))
     
-    return component_log_prob_nans_replaced, component_log_prob_nans_replaced, broadcast_w
+    return component_log_prob_nans_replaced, component_log_cdf_nans_replaced, broadcast_w
