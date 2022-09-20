@@ -32,14 +32,15 @@ class Base_RCLP(abc.ABC):
         """
         softmax_bijector = tfb.SoftmaxCentered()
         
+        # Xavier initialization for w
         w_xavier_hw = 1.0 / tf.math.sqrt(tf.constant(M-1, dtype=tf.float32))
-        def init_w():
+        def init_lp_w():
             return softmax_bijector.forward(
                 tf.random.uniform((M-1,), -w_xavier_hw, w_xavier_hw))
         
         rc_parameters.update({
-            'w': {
-                'init': init_w,
+            'lp_w': {
+                'init': init_lp_w,
                 'bijector': softmax_bijector
             }
         })
@@ -71,7 +72,7 @@ class Base_RCLP(abc.ABC):
     
     
     @abc.abstractmethod
-    def log_g(self, lp_F, **kwargs):
+    def rc_log_prob(self, lp_cdf, **kwargs):
         """
         Calculate the log density of a recalibrating transformation for an
         ensemble forecast. This should correspond to a distribution with support
@@ -79,7 +80,7 @@ class Base_RCLP(abc.ABC):
         
         Parameters
         ----------
-        lp_F: 1D tensor with length N
+        lp_cdf: 1D tensor with length N
             cdf values from the linear pool for observation cases i = 1, ..., N
         **kwargs: dictionary
             additional parameters as specified by the concrete implementation,
@@ -94,16 +95,16 @@ class Base_RCLP(abc.ABC):
         """
     
     
-    def ens_log_f(self, log_f, log_F):
+    def log_prob(self, component_log_prob, component_log_cdf):
         """
         Log pdf of ensemble
         
         Parameters
         ----------
-        log_f: 2D tensor with shape (N, M)
+        component_log_prob: 2D tensor with shape (N, M)
             Component log pdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
-        log_F: 2D tensor with shape (N, M)
+        component_log_cdf: 2D tensor with shape (N, M)
             Component log cdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
         
@@ -111,28 +112,34 @@ class Base_RCLP(abc.ABC):
         -------
         Log of ensemble pdf for all observation cases as a tensor of length N
         """
-        # separately extract parameters for the linear pool (just 'w')
-        # and parameters for recalibration (all other than 'w')
-        w = self.parameters['w']
-        rc_parameters = {k: v for k,v in self.parameters.items() if k != 'w'}
+        # separately extract parameters for the linear pool (just 'lp_w')
+        # and parameters for recalibration (all other than 'lp_w')
+        lp_w = self.parameters['lp_w']
+        rc_parameters = {k: v for k,v in self.parameters.items() if k != 'lp_w'}
         
-        # adjust log_f, log_F, and w to handle missing values
-        log_f, log_F, w = util.handle_missingness(log_f=log_f, log_F=log_F, w=w)
+        # adjust to handle missing values
+        component_log_prob, component_log_cdf, lp_w = util.handle_missingness(
+            component_log_prob=component_log_prob,
+            component_log_cdf=component_log_cdf,
+            w=lp_w)
         
-        # log_f and log_F for linear pool
-        lp_log_f = tf.reduce_logsumexp(log_f + tf.math.log(w), axis=1)
-        lp_log_F = tf.reduce_logsumexp(log_F + tf.math.log(w), axis=1)
+        # log_prob and log_cdf for linear pool
+        lp_log_prob = tf.reduce_logsumexp(component_log_prob + tf.math.log(lp_w),
+                                          axis=1)
+        lp_log_cdf = tf.reduce_logsumexp(component_log_cdf + tf.math.log(lp_w),
+                                          axis=1)
         
         # log probability for recalibrated linear pool
         # log[f(y)] = log[ g{ \sum_{m=1}^M \pi_m F_{m,i}(y); \theta } ]
         #              + log[ \sum_{m=1}^M \pi_m f_{m,i}(y) ]
-        ens_log_f = self.log_g(lp_F=tf.math.exp(lp_log_F), **rc_parameters) + \
-            lp_log_f
+        log_prob = self.rc_log_prob(lp_cdf=tf.math.exp(lp_log_cdf),
+                                    **rc_parameters) + \
+            lp_log_prob
         
-        return ens_log_f
+        return log_prob
     
     
-    def log_score_objective(self, log_f, log_F):
+    def log_score_objective(self, component_log_prob, component_log_cdf):
         """
         Log score objective function for use during parameter estimation
         
@@ -140,10 +147,10 @@ class Base_RCLP(abc.ABC):
         ----------
         param_vec: 1D tensor of length self.n_param
             parameters vector
-        log_f: 2D tensor with shape (N, M)
+        component_log_prob: 2D tensor with shape (N, M)
             Component log pdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
-        log_F: 2D tensor with shape (N, M)
+        component_log_cdf: 2D tensor with shape (N, M)
             Component log cdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
         
@@ -153,12 +160,13 @@ class Base_RCLP(abc.ABC):
         """
         # negative sum of ensemble log pdf values across
         # observation indices i = 1, ..., N
-        return -tf.reduce_sum(self.ens_log_f(log_f, log_F))
+        return -tf.reduce_sum(self.log_prob(component_log_prob,
+                                            component_log_cdf))
     
     
     def fit(self,
-            log_f,
-            log_F,
+            component_log_prob,
+            component_log_cdf,
             optim_method = "adam",
             num_iter = 100,
             learning_rate = 0.1,
@@ -170,14 +178,12 @@ class Base_RCLP(abc.ABC):
         
         Parameters
         ----------
-        log_f: 2D tensor with shape (N, M)
+        component_log_prob: 2D tensor with shape (N, M)
             Component log pdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
-        log_F: 2D tensor with shape (N, M)
+        component_log_cdf: 2D tensor with shape (N, M)
             Component log cdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
-        init_param_vec: optional 1D tensor of length self.n_param
-            optional initial values for the weights during estimation
         optim_method: string
             optional method for optimization.  Options are "adam" or "sgd".
         num_iter: integer
@@ -186,8 +192,10 @@ class Base_RCLP(abc.ABC):
             The learning rate
         """
         # convert inputs to float tensors
-        log_f = tf.convert_to_tensor(log_f, dtype=tf.float32)
-        log_F = tf.convert_to_tensor(log_F, dtype=tf.float32)
+        component_log_prob = tf.convert_to_tensor(component_log_prob,
+                                                  dtype=tf.float32)
+        component_log_cdf = tf.convert_to_tensor(component_log_cdf,
+                                                 dtype=tf.float32)
         
         # TODO: validate log_f and log_F arguments
         # self.validate_log_f_log_F(log_f, log_F)
@@ -211,7 +219,9 @@ class Base_RCLP(abc.ABC):
         # apply gradient descent num_iter times
         for i in range(num_iter):
             with tf.GradientTape() as tape:
-                loss = self.log_score_objective(log_f=log_f, log_F=log_F)
+                loss = self.log_score_objective(
+                    component_log_prob=component_log_prob,
+                    component_log_cdf=component_log_cdf)
             grads = tape.gradient(loss, trainable_variables)
             grads, _ = tf.clip_by_global_norm(grads, 10.0)
             optimizer.apply_gradients(zip(grads, trainable_variables))
@@ -229,7 +239,8 @@ class Base_RCLP(abc.ABC):
             if (i + 1) % save_frequency == 0:
                 # save parameter estimates and loss trace
                 params_to_save = {
-                    'param_estimates': { k: v.numpy() for k,v in self.parameters.items() },
+                    'param_estimates': { k: v.numpy() \
+                                         for k,v in self.parameters.items() },
                     'loss_trace': lls_
                 }
                 
@@ -256,17 +267,17 @@ class Beta_RCLP(Base_RCLP):
         None
         """
         softplus_bijector = tfb.Softplus()
-        def init_alpha_beta():
+        def init_rc_alpha_beta():
             return softplus_bijector.forward(
                 tf.random.normal((1,)))
         
         rc_parameters = {
-            'alpha': {
-                'init': init_alpha_beta,
+            'rc_alpha': {
+                'init': init_rc_alpha_beta,
                 'bijector': softplus_bijector
             },
-            'beta': {
-                'init': init_alpha_beta,
+            'rc_beta': {
+                'init': init_rc_alpha_beta,
                 'bijector': softplus_bijector
             }
         }
@@ -274,7 +285,7 @@ class Beta_RCLP(Base_RCLP):
         super(Beta_RCLP, self).__init__(M=M, rc_parameters=rc_parameters)
     
     
-    def log_g(self, lp_F, alpha, beta):
+    def rc_log_prob(self, lp_cdf, rc_alpha, rc_beta):
         """
         Calculate the log density of a recalibrating transformation for an
         ensemble forecast. For a beta recalibrated linear pool, the
@@ -283,11 +294,11 @@ class Beta_RCLP(Base_RCLP):
         
         Parameters
         ----------
-        lp_F: 1D tensor with length N
+        lp_cdf: 1D tensor with length N
             cdf values from the linear pool for observation cases i = 1, ..., N
-        alpha: scalar
+        rc_alpha: scalar
             first shape parameter of Beta distribution
-        beta: scalar
+        rc_beta: scalar
             second shape parameter of Beta distribution
         
         Returns
@@ -296,9 +307,9 @@ class Beta_RCLP(Base_RCLP):
             log recalibration density evaluated at the linear pool cdf values
             for each observation case i = 1, ..., N
         """
-        # note that we transform lp_F away from 0 and 1 to avoid numeric issues
+        # note that we transform lp_cdf away from 0 and 1 to avoid numeric issues
         # at the boundary of the support of the Beta distribution
-        return tfd.Beta(alpha, beta).log_prob(lp_F * 0.99999 + 0.000005)
+        return tfd.Beta(rc_alpha, rc_beta).log_prob(lp_cdf * 0.99999 + 0.000005)
 
 
 
@@ -319,7 +330,7 @@ class LinearPool(Base_RCLP):
         super(LinearPool, self).__init__(M=M, rc_parameters={})
     
     
-    def log_g(self, lp_F):
+    def rc_log_prob(self, lp_cdf):
         """
         Calculate the log density of a recalibrating transformation for an
         ensemble forecast. For a linear pool, no recalibration is done. This
@@ -328,7 +339,7 @@ class LinearPool(Base_RCLP):
         
         Parameters
         ----------
-        lp_F: 1D tensor with length N
+        lp_cdf: 1D tensor with length N
             cdf values from the linear pool for observation cases i = 1, ..., N
         
         Returns
@@ -337,5 +348,4 @@ class LinearPool(Base_RCLP):
             log recalibration density evaluated at the linear pool cdf values
             for each observation case i = 1, ..., N
         """
-        
-        return tf.zeros_like(lp_F)
+        return tf.zeros_like(lp_cdf)
