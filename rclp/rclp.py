@@ -350,96 +350,6 @@ class Base_RCLP(abc.ABC):
 
 
 
-class Beta_RCLP(Base_RCLP):
-    def __init__(self, M) -> None:
-        """
-        Initialize a beta re-calibrated linear pool model
-        
-        Parameters
-        ----------
-        M: integer
-            number of component models
-        
-        Returns
-        -------
-        None
-        """
-        softplus_bijector = tfb.Softplus()
-        def init_rc_alpha_beta():
-            return softplus_bijector.forward(
-                tf.random.normal((1,)))
-        
-        rc_parameters = {
-            'rc_alpha': {
-                'init': init_rc_alpha_beta,
-                'bijector': softplus_bijector
-            },
-            'rc_beta': {
-                'init': init_rc_alpha_beta,
-                'bijector': softplus_bijector
-            }
-        }
-        
-        super(Beta_RCLP, self).__init__(M=M, rc_parameters=rc_parameters)
-    
-    
-    def rc_log_prob(self, lp_log_cdf, rc_alpha, rc_beta):
-        """
-        Calculate the log density of a recalibrating transformation for an
-        ensemble forecast. For a beta recalibrated linear pool, the
-        recalibrating transformation corresponds to a Beta(alpha, beta)
-        distribution.
-        
-        Parameters
-        ----------
-        lp_log_cdf: 1D tensor with length N
-            log cdf values from the linear pool for observation cases i = 1, ..., N
-        rc_alpha: scalar
-            first shape parameter of Beta distribution
-        rc_beta: scalar
-            second shape parameter of Beta distribution
-        
-        Returns
-        -------
-        1D tensor of length N
-            log recalibration density evaluated at the linear pool cdf values
-            for each observation case i = 1, ..., N
-        """
-        # note that we transform lp_cdf away from 0 and 1 to avoid numeric issues
-        # at the boundary of the support of the Beta distribution
-        lp_cdf = tf.math.exp(lp_log_cdf) * 0.99999 + 0.000005
-        return tfd.Beta(rc_alpha, rc_beta).log_prob(lp_cdf)
-    
-    
-    def rc_log_cdf(self, lp_log_cdf, rc_alpha, rc_beta):
-        """
-        Calculate the log cdf of a recalibrating transformation for an
-        ensemble forecast. This should correspond to a distribution with support
-        on the interval [0, 1].
-        
-        Parameters
-        ----------
-        lp_log_cdf: 1D tensor with length N
-            log cdf values from the linear pool for observation cases i = 1, ..., N
-        rc_alpha: scalar
-            first shape parameter of Beta distribution
-        rc_beta: scalar
-            second shape parameter of Beta distribution
-        
-        Returns
-        -------
-        1D tensor of length N
-            log recalibration cdf evaluated at the linear pool cdf values
-            for each observation case i = 1, ..., N
-        """
-        # note that we transform lp_cdf away from 0 and 1 to avoid numeric issues
-        # at the boundary of the support of the Beta distribution
-        lp_cdf = tf.math.exp(lp_log_cdf) * 0.99999 + 0.000005
-        return tfd.Beta(rc_alpha, rc_beta).log_cdf(lp_cdf)
-
-
-
-
 class LinearPool(Base_RCLP):
     def __init__(self, M) -> None:
         """
@@ -497,3 +407,120 @@ class LinearPool(Base_RCLP):
             for each observation case i = 1, ..., N
         """
         return lp_log_cdf
+
+
+
+class BetaMixtureRCLP(Base_RCLP):
+    def __init__(self, M, K) -> None:
+        """
+        Initialize a beta mixture re-calibrated linear pool model
+        
+        Parameters
+        ----------
+        M: integer
+            number of component models
+        K: integer
+            number of beta mixture components
+        
+        Returns
+        -------
+        None
+        """
+        # Xavier initialization for pi
+        if K == 1:
+            pi_xavier_hw = tf.constant(1.0, dtype=tf.float32)
+        else:
+            pi_xavier_hw = 1.0 / tf.math.sqrt(tf.constant(K-1, dtype=tf.float32))
+        
+        softmax_bijector = tfb.SoftmaxCentered()
+        def init_rc_pi():
+            return softmax_bijector.forward(
+                tf.random.uniform((K-1,), -pi_xavier_hw, pi_xavier_hw))
+        
+        softplus_bijector = tfb.Softplus()
+        def init_rc_alpha_beta():
+            return softplus_bijector.forward(
+                tf.random.normal((K,)))
+        
+        rc_parameters = {
+            'rc_pi': {
+                'init': init_rc_pi,
+                'bijector': softmax_bijector
+            },
+            'rc_alpha': {
+                'init': init_rc_alpha_beta,
+                'bijector': softplus_bijector
+            },
+            'rc_beta': {
+                'init': init_rc_alpha_beta,
+                'bijector': softplus_bijector
+            }
+        }
+        
+        super(BetaMixtureRCLP, self).__init__(M=M, rc_parameters=rc_parameters)
+    
+    
+    def rc_log_prob(self, lp_log_cdf, rc_pi, rc_alpha, rc_beta):
+        """
+        Calculate the log density of a recalibrating transformation for an
+        ensemble forecast. For a beta mixture recalibrated linear pool, the
+        recalibrating transformation corresponds to a mixture of beta
+        distributions, i.e., F(x) = \sum_{k=1}^K pi_k Beta(x | alpha_k, beta_k)
+        
+        Parameters
+        ----------
+        lp_log_cdf: 1D tensor with length N
+            log cdf values from the linear pool for observation cases i = 1, ..., N
+        rc_pi: tensor of length K
+            mixture component weights
+        rc_alpha: tensor of length K
+            first shape parameter of Beta distribution for each mixture component
+        rc_beta: tensor of length K
+            second shape parameter of Beta distribution for each mixture component
+        
+        Returns
+        -------
+        1D tensor of length N
+            log recalibration density evaluated at the linear pool cdf values
+            for each observation case i = 1, ..., N
+        """
+        # note that we transform lp_cdf away from 0 and 1 to avoid numeric issues
+        # at the boundary of the support of the Beta distribution
+        lp_cdf = tf.math.exp(lp_log_cdf) * 0.99999 + 0.000005
+        return tfd.MixtureSameFamily(
+                mixture_distribution=tfd.Categorical(probs=rc_pi),
+                components_distribution=tfd.Beta(rc_alpha, rc_beta)
+            ).log_prob(lp_cdf)
+    
+    
+    def rc_log_cdf(self, lp_log_cdf, rc_pi, rc_alpha, rc_beta):
+        """
+        Calculate the log cdf of a recalibrating transformation for an
+        ensemble forecast. For a beta mixture recalibrated linear pool, the
+        recalibrating transformation corresponds to a mixture of beta
+        distributions, i.e., F(x) = \sum_{k=1}^K pi_k Beta(x | alpha_k, beta_k)
+        
+        Parameters
+        ----------
+        lp_log_cdf: 1D tensor with length N
+            log cdf values from the linear pool for observation cases i = 1, ..., N
+        rc_pi: tensor of length K
+            mixture component weights
+        rc_alpha: scalar
+            first shape parameter of Beta distribution
+        rc_beta: scalar
+            second shape parameter of Beta distribution
+        
+        Returns
+        -------
+        1D tensor of length N
+            log recalibration cdf evaluated at the linear pool cdf values
+            for each observation case i = 1, ..., N
+        """
+        # note that we transform lp_cdf away from 0 and 1 to avoid numeric issues
+        # at the boundary of the support of the Beta distribution
+        lp_cdf = tf.math.exp(lp_log_cdf) * 0.99999 + 0.000005
+        return tfd.MixtureSameFamily(
+                mixture_distribution=tfd.Categorical(probs=rc_pi),
+                components_distribution=tfd.Beta(rc_alpha, rc_beta)
+            ).log_cdf(lp_cdf)
