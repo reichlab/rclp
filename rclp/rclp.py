@@ -10,14 +10,14 @@ tfd = tfp.distributions
 
 from . import util
 
-class Base_RCLP(abc.ABC):
+class BaseRCLP(abc.ABC):
     """
     Base class for a recalibrated linear pool, with estimation by optimizing
     log score.
     """
     def __init__(self, M, rc_parameters={}) -> None:
         """
-        Initialize a Base_RCLP model
+        Initialize an RCLP model
         
         Parameters
         ----------
@@ -121,7 +121,7 @@ class Base_RCLP(abc.ABC):
     
     def log_prob(self, component_log_prob, component_log_cdf):
         """
-        Log pdf of ensemble
+        Log pdf of recalibrated linear pool ensemble
         
         Parameters
         ----------
@@ -165,7 +165,7 @@ class Base_RCLP(abc.ABC):
     
     def prob(self, component_log_prob, component_log_cdf):
         """
-        pdf of ensemble
+        pdf of recalibrated linear pool ensemble
         
         Parameters
         ----------
@@ -185,7 +185,7 @@ class Base_RCLP(abc.ABC):
         
     def log_cdf(self, component_log_cdf):
         """
-        Log cdf of ensemble
+        Log cdf of recalibrated linear pool ensemble
         
         Parameters
         ----------
@@ -222,7 +222,7 @@ class Base_RCLP(abc.ABC):
     
     def cdf(self, component_log_cdf):
         """
-        cdf of ensemble
+        cdf of recalibrated linear pool ensemble
         
         Parameters
         ----------
@@ -243,8 +243,6 @@ class Base_RCLP(abc.ABC):
         
         Parameters
         ----------
-        param_vec: 1D tensor of length self.n_param
-            parameters vector
         component_log_prob: 2D tensor with shape (N, M)
             Component log pdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
@@ -285,9 +283,20 @@ class Base_RCLP(abc.ABC):
         optim_method: string
             optional method for optimization.  Options are "adam" or "sgd".
         num_iter: integer
-            number of iterations for optimization
+            Number of iterations for optimization
         learning_rate: Tensor or a floating point value.
             The learning rate
+        verbose: boolean
+            Indicator of whether logging messages should be printed
+        save_frequency: integer or None
+            Parameter estimates will be saved after every `save_frequency`
+            optimization iterations
+        save_path: string
+            File path where parameter estimates will be saved
+        
+        Returns
+        -------
+        None
         """
         # convert inputs to float tensors
         component_log_prob = tf.convert_to_tensor(component_log_prob,
@@ -350,7 +359,7 @@ class Base_RCLP(abc.ABC):
 
 
 
-class LinearPool(Base_RCLP):
+class LinearPool(BaseRCLP):
     def __init__(self, M) -> None:
         """
         Initialize a LinearPool model
@@ -383,7 +392,7 @@ class LinearPool(Base_RCLP):
         -------
         1D tensor of length N
             log recalibration density evaluated at the linear pool cdf values
-            for each observation case i = 1, ..., N
+            for each observation case i = 1, ..., N; all values are 0
         """
         return tf.zeros_like(lp_log_cdf)
     
@@ -410,7 +419,7 @@ class LinearPool(Base_RCLP):
 
 
 
-class BetaMixtureRCLP(Base_RCLP):
+class BetaMixtureRCLP(BaseRCLP):
     def __init__(self, M, K) -> None:
         """
         Initialize a beta mixture re-calibrated linear pool model
@@ -484,8 +493,8 @@ class BetaMixtureRCLP(Base_RCLP):
             log recalibration density evaluated at the linear pool cdf values
             for each observation case i = 1, ..., N
         """
-        # note that we transform lp_cdf away from 0 and 1 to avoid numeric issues
-        # at the boundary of the support of the Beta distribution
+        # note that we transform lp_cdf away from 0 and 1 to avoid numerical
+        # issues at the boundary of the support of the Beta distribution
         lp_cdf = tf.math.exp(lp_log_cdf) * 0.99999 + 0.000005
         return tfd.MixtureSameFamily(
                 mixture_distribution=tfd.Categorical(probs=rc_pi),
@@ -506,9 +515,9 @@ class BetaMixtureRCLP(Base_RCLP):
             log cdf values from the linear pool for observation cases i = 1, ..., N
         rc_pi: tensor of length K
             mixture component weights
-        rc_alpha: scalar
+        rc_alpha: tensor of length K
             first shape parameter of Beta distribution
-        rc_beta: scalar
+        rc_beta: tensor of length K
             second shape parameter of Beta distribution
         
         Returns
