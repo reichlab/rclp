@@ -87,6 +87,37 @@ class BaseRCLP(abc.ABC):
         self._loss_trace = value
     
     
+    def validate_component_log_prob_cdf(self,
+                                        component_log_prob, component_log_cdf):
+        """
+        Validate that component_log_prob and component_log_cdf they have the
+        same shape of dimension 2 and have the same patterns of missingness.
+        
+        Parameters
+        ----------
+        component_log_prob: 2D tensor with shape (N, M)
+            Component log pdf values for observation cases i = 1, ..., N,
+            models m = 1, ..., M
+        component_log_cdf: 2D tensor with shape (N, M)
+            Component log cdf values for observation cases i = 1, ..., N,
+            models m = 1, ..., M
+        
+        Returns
+        -------
+        None
+        """
+        if not component_log_prob.shape == component_log_cdf.shape:
+            raise ValueError("component_log_prob and component_log_cdf must have the same shape")
+        
+        if not len(component_log_prob.shape) == 2:
+            raise ValueError("component_log_prob and component_log_cdf must have be 2-dimensional")
+        
+        prob_missing_mask = tf.math.is_nan(component_log_prob)
+        cdf_missing_mask = tf.math.is_nan(component_log_cdf)
+        if not tf.reduce_all(prob_missing_mask == cdf_missing_mask):
+            raise ValueError("any missing values in component_log_prob and component_log_cdf must be at the same indices")
+    
+    
     @abc.abstractmethod
     def rc_log_prob(self, lp_log_cdf, **kwargs):
         """
@@ -135,7 +166,7 @@ class BaseRCLP(abc.ABC):
         """
     
     
-    def log_prob(self, component_log_prob, component_log_cdf):
+    def log_prob(self, component_log_prob, component_log_cdf, validate=True):
         """
         Log pdf of recalibrated linear pool ensemble
         
@@ -147,11 +178,19 @@ class BaseRCLP(abc.ABC):
         component_log_cdf: 2D tensor with shape (N, M)
             Component log cdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
+        validate: boolean
+            Indicator of whether component_log_prob and component_log_cdf should
+            be validated
         
         Returns
         -------
         Log of ensemble pdf for all observation cases as a tensor of length N
         """
+        # if necessary, validate
+        if validate:
+            self.validate_component_log_prob_cdf(component_log_prob,
+                                                 component_log_cdf)
+        
         # separately extract parameters for the linear pool (just 'lp_w')
         # and parameters for recalibration (all other than 'lp_w')
         lp_w = self.parameters['lp_w']
@@ -179,7 +218,7 @@ class BaseRCLP(abc.ABC):
         return log_prob
     
     
-    def prob(self, component_log_prob, component_log_cdf):
+    def prob(self, component_log_prob, component_log_cdf, validate=True):
         """
         pdf of recalibrated linear pool ensemble
         
@@ -191,12 +230,16 @@ class BaseRCLP(abc.ABC):
         component_log_cdf: 2D tensor with shape (N, M)
             Component log cdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
+        validate: boolean
+            Indicator of whether component_log_prob and component_log_cdf should
+            be validated
         
         Returns
         -------
         Ensemble pdf value for all observation cases as a tensor of length N
         """
-        return tf.math.exp(self.log_prob(component_log_prob, component_log_cdf))
+        return tf.math.exp(self.log_prob(component_log_prob, component_log_cdf,
+                                         validate=validate))
     
         
     def log_cdf(self, component_log_cdf):
@@ -253,7 +296,7 @@ class BaseRCLP(abc.ABC):
         return tf.math.exp(self.log_cdf(component_log_cdf))
     
     
-    def log_score_objective(self, component_log_prob, component_log_cdf):
+    def log_score_objective(self, component_log_prob, component_log_cdf, validate=True):
         """
         Log score objective function for use during parameter estimation
         
@@ -265,6 +308,9 @@ class BaseRCLP(abc.ABC):
         component_log_cdf: 2D tensor with shape (N, M)
             Component log cdf values for observation cases i = 1, ..., N,
             models m = 1, ..., M
+        validate: boolean
+            Indicator of whether component_log_prob and component_log_cdf should
+            be validated
         
         Returns
         -------
@@ -273,7 +319,8 @@ class BaseRCLP(abc.ABC):
         # negative sum of ensemble log pdf values across
         # observation indices i = 1, ..., N
         return -tf.reduce_sum(self.log_prob(component_log_prob,
-                                            component_log_cdf))
+                                            component_log_cdf,
+                                            validate=validate))
     
     
     def fit(self,
@@ -321,9 +368,9 @@ class BaseRCLP(abc.ABC):
         component_log_cdf = tf.convert_to_tensor(component_log_cdf,
                                                  dtype=tf.float32)
         
-        # TODO: validate component_log_prob and component_log_cdf
-        # self.validate_component_log_prob_cdf(component_log_prob,
-        #                                      component_log_cdf)
+        # validate component_log_prob and component_log_cdf
+        self.validate_component_log_prob_cdf(component_log_prob,
+                                             component_log_cdf)
         
         # validate num_iter and save_frequency
         # validation of other arguments happens elsewhere
@@ -356,7 +403,8 @@ class BaseRCLP(abc.ABC):
             with tf.GradientTape() as tape:
                 loss = self.log_score_objective(
                     component_log_prob=component_log_prob,
-                    component_log_cdf=component_log_cdf)
+                    component_log_cdf=component_log_cdf,
+                    validate=False)
             grads = tape.gradient(loss, trainable_variables)
             grads, _ = tf.clip_by_global_norm(grads, 10.0)
             optimizer.apply_gradients(zip(grads, trainable_variables))
