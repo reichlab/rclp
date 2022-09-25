@@ -351,7 +351,8 @@ class BaseRCLP(abc.ABC):
                     'loss_trace': lls_
                 }
                 
-                pickle.dump(params_to_save, open(str(save_path), "wb"))
+                with open(str(save_path), 'wb') as outfile:
+                    pickle.dump(params_to_save, outfile)
         
         # set parameter estimates
         # self.set_param_estimates_vec(params_vec_var.numpy())
