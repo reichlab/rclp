@@ -495,7 +495,8 @@ class BetaMixtureRCLP(BaseRCLP):
         """
         # note that we transform lp_cdf away from 0 and 1 to avoid numerical
         # issues at the boundary of the support of the Beta distribution
-        lp_cdf = tf.math.exp(lp_log_cdf) * 0.99999 + 0.000005
+        eps = 2.0 * np.finfo(np.float32).eps
+        lp_cdf = tf.math.exp(lp_log_cdf) * (1.0 - 2.0 * eps) + eps
         return tfd.MixtureSameFamily(
                 mixture_distribution=tfd.Categorical(probs=rc_pi),
                 components_distribution=tfd.Beta(rc_alpha, rc_beta)
@@ -528,7 +529,8 @@ class BetaMixtureRCLP(BaseRCLP):
         """
         # note that we transform lp_cdf away from 0 and 1 to avoid numeric issues
         # at the boundary of the support of the Beta distribution
-        lp_cdf = tf.math.exp(lp_log_cdf) * 0.99999 + 0.000005
+        eps = np.finfo(np.float32).eps
+        lp_cdf = tf.math.exp(lp_log_cdf) * (1.0 - 2.0 * eps) + eps
         return tfd.MixtureSameFamily(
                 mixture_distribution=tfd.Categorical(probs=rc_pi),
                 components_distribution=tfd.Beta(rc_alpha, rc_beta)
