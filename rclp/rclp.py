@@ -56,6 +56,9 @@ class BaseRCLP(abc.ABC):
             ) \
                 for param_name, param_config in self._parameter_defs.items()
         }
+        
+        # initialize loss trace
+        self.loss_trace = np.zeros((0,), np.float32)
     
     
     @property
@@ -69,6 +72,19 @@ class BaseRCLP(abc.ABC):
     @parameters.setter
     def parameters(self, value):
         self._parameters = value
+    
+    
+    @property
+    def loss_trace(self):
+        """
+        Dictionary of ensemble model parameters
+        """
+        return self._loss_trace
+    
+    
+    @loss_trace.setter
+    def loss_trace(self, value):
+        self._loss_trace = value
     
     
     @abc.abstractmethod
@@ -270,7 +286,8 @@ class BaseRCLP(abc.ABC):
             save_frequency = None,
             save_path = None):
         """
-        Estimate model parameters
+        Estimate model parameters. This can be called multiple times; later
+        calls will continue optimization from the results of earlier calls.
         
         Parameters
         ----------
@@ -365,9 +382,8 @@ class BaseRCLP(abc.ABC):
                 with open(str(save_path), 'wb') as outfile:
                     pickle.dump(params_to_save, outfile)
         
-        # set parameter estimates
-        # self.set_param_estimates_vec(params_vec_var.numpy())
-        self.loss_trace = lls_
+        # update loss trace
+        self.loss_trace = np.concatenate([self.loss_trace, lls_])
 
 
 
