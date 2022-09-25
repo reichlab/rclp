@@ -304,17 +304,28 @@ class BaseRCLP(abc.ABC):
         component_log_cdf = tf.convert_to_tensor(component_log_cdf,
                                                  dtype=tf.float32)
         
-        # TODO: validate log_f and log_F arguments
-        # self.validate_log_f_log_F(log_f, log_F)
+        # TODO: validate component_log_prob and component_log_cdf
+        # self.validate_component_log_prob_cdf(component_log_prob,
+        #                                      component_log_cdf)
+        
+        # validate num_iter and save_frequency
+        # validation of other arguments happens elsewhere
+        if not isinstance(num_iter, int):
+            raise ValueError('num_iter must be an int')
         
         if save_frequency == None:
             save_frequency = num_iter + 1
+        
+        if not isinstance(save_frequency, int):
+            raise ValueError('save_frequency must be None or an int')
         
         # create optimizer
         if optim_method == "adam":
             optimizer = tf.optimizers.Adam(learning_rate = learning_rate)
         elif optim_method == "sgd":
             optimizer = tf.optimizers.SGD(learning_rate = learning_rate)
+        else:
+            raise ValueError('optim_method must be either "adam" or "sgd"')
         
         # initiate loss trace
         lls_ = np.zeros(num_iter, np.float32)
@@ -374,6 +385,9 @@ class LinearPool(BaseRCLP):
         -------
         None
         """
+        if not isinstance(M, int):
+            raise ValueError('M must be an int')
+        
         super(LinearPool, self).__init__(M=M, rc_parameters={})
     
     
@@ -436,6 +450,12 @@ class BetaMixtureRCLP(BaseRCLP):
         -------
         None
         """
+        if not isinstance(M, int):
+            raise ValueError('M must be an int')
+        
+        if not isinstance(K, int):
+            raise ValueError('K must be an int')
+        
         # Xavier initialization for pi
         if K == 1:
             pi_xavier_hw = tf.constant(1.0, dtype=tf.float32)
