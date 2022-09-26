@@ -8,8 +8,6 @@ import tensorflow_probability as tfp
 tfb = tfp.bijectors
 tfd = tfp.distributions
 
-from . import util
-
 class BaseRCLP(abc.ABC):
     """
     Base class for a recalibrated linear pool, with estimation by optimizing
@@ -85,6 +83,77 @@ class BaseRCLP(abc.ABC):
     @loss_trace.setter
     def loss_trace(self, value):
         self._loss_trace = value
+    
+    
+    def handle_missingness(self, component_log_prob, component_log_cdf,
+                           validate=True):
+        """
+        Broadcast w to the same shape as component_log_prob, set weights
+        corresponding to missing entries of component_log_prob to 0, and
+        re-normalize so that the weights sum to 1. Then, replace nans in
+        component_log_prob and component_log_cdf with 0. It is implicitly
+        assumed, but not explicitly checked, that component_log_prob and
+        component_log_cdf have missing values in the same locations.
+
+        Parameters
+        ----------
+        component_log_prob: 2D tensor with shape (N, M)
+            Component log pdf values for observation cases i = 1, ..., N,
+            models m = 1, ..., M
+        component_log_cdf: 2D tensor with shape (N, M)
+            Component log cdf values for observation cases i = 1, ..., N,
+            models m = 1, ..., M
+        validate: boolean
+            Indicator of whether component_log_prob and component_log_cdf should
+            be validated
+        
+        Returns
+        -------
+        component_log_prob_nans_replaced: 2D tensor with shape (N, M)
+            Component log-pdf values with nans replaced with -infinity
+        component_log_cdf_nans_replaced: 2D tensor with shape (N, M)
+            Component log-cdf values with nans replaced with -infinity
+        broadcast_w: 2D tensor with shape (N, M)
+            broadcast_w has N copies of the argument w with weights w[i,m] set
+            to 0 at indices where log_f[i,m] is nan. The weights are then
+            re-normalized to sum to 1 within each combination of i.
+        """
+        # if necessary, validate
+        if validate:
+            self.validate_component_log_prob_cdf(component_log_prob,
+                                                 component_log_cdf)
+        
+        # extract weights for linear pool
+        w = self.parameters['lp_w']
+        
+        # broadcast w to the same shape as log_f, creating N copies of w
+        log_prob_shape = tf.shape(component_log_prob).numpy()
+        broadcast_w = tf.broadcast_to(w, log_prob_shape)
+
+        # if there is missingness, adjust entries of broadcast_w
+        missing_mask = tf.math.is_nan(component_log_prob)
+        if tf.reduce_any(missing_mask):
+            # nonmissing mask has shape (N, M), with entries
+            # 0 where log_f had missing values and 1 elsewhere
+            nonmissing_mask = tf.cast(
+                tf.logical_not(missing_mask),
+                dtype = broadcast_w.dtype)
+
+            # set weights corresponding to missing entries of q to 0
+            broadcast_w = tf.math.multiply(broadcast_w, nonmissing_mask)
+
+            # renormalize weights to sum to 1 along the model axis
+            (broadcast_w, _) = tf.linalg.normalize(broadcast_w, ord = 1, axis = -1)
+
+        # replace nan with 0 in log_f and log_F
+        component_log_prob_nans_replaced = tf.where(missing_mask,
+                                                    np.float32(-np.inf),
+                                                    np.float32(component_log_prob))
+        component_log_cdf_nans_replaced = tf.where(missing_mask,
+                                                np.float32(-np.inf),
+                                                np.float32(component_log_cdf))
+        
+        return component_log_prob_nans_replaced, component_log_cdf_nans_replaced, broadcast_w
     
     
     def validate_component_log_prob_cdf(self,
@@ -191,22 +260,21 @@ class BaseRCLP(abc.ABC):
             self.validate_component_log_prob_cdf(component_log_prob,
                                                  component_log_cdf)
         
-        # separately extract parameters for the linear pool (just 'lp_w')
-        # and parameters for recalibration (all other than 'lp_w')
-        lp_w = self.parameters['lp_w']
-        rc_parameters = {k: v for k,v in self.parameters.items() if k != 'lp_w'}
-        
-        # adjust to handle missing values
-        component_log_prob, component_log_cdf, lp_w = util.handle_missingness(
+        # handle missing values; returns linear pool weights and updated
+        # component model probabilities
+        component_log_prob, component_log_cdf, lp_w = self.handle_missingness(
             component_log_prob=component_log_prob,
             component_log_cdf=component_log_cdf,
-            w=lp_w)
+            validate=False)
         
         # log_prob and log_cdf for linear pool
         lp_log_prob = tf.reduce_logsumexp(component_log_prob + tf.math.log(lp_w),
                                           axis=1)
         lp_log_cdf = tf.reduce_logsumexp(component_log_cdf + tf.math.log(lp_w),
                                           axis=1)
+        
+        # extract parameters for recalibration (all other than 'lp_w')
+        rc_parameters = {k: v for k,v in self.parameters.items() if k != 'lp_w'}
         
         # log probability for recalibrated linear pool
         # log[f(y)] = log[ g{ \sum_{m=1}^M \pi_m F_{m,i}(y); \theta } ]
@@ -256,23 +324,22 @@ class BaseRCLP(abc.ABC):
         -------
         Log of ensemble cdf for all observation cases as a tensor of length N
         """
-        # separately extract parameters for the linear pool (just 'lp_w')
-        # and parameters for recalibration (all other than 'lp_w')
-        lp_w = self.parameters['lp_w']
-        rc_parameters = {k: v for k,v in self.parameters.items() if k != 'lp_w'}
-        
-        # adjust to handle missing values
+        # handle missing values; returns linear pool weights and updated
+        # component model probabilities
         # note that we intentionally pass component_log_cdf as
         # component_log_prob to satisfy handle_missingness, then discard the
-        # extra result. TODO: refactor handle_missingness so this isn't necessary
-        _, component_log_cdf, lp_w = util.handle_missingness(
+        # extra result. TODO: update handle_missingness so this isn't necessary
+        _, component_log_cdf, lp_w = self.handle_missingness(
             component_log_prob=component_log_cdf,
             component_log_cdf=component_log_cdf,
-            w=lp_w)
+            validate=False)
         
         # log_cdf for linear pool
         lp_log_cdf = tf.reduce_logsumexp(component_log_cdf + tf.math.log(lp_w),
                                           axis=1)
+        
+        # extract parameters for recalibration (all other than 'lp_w')
+        rc_parameters = {k: v for k,v in self.parameters.items() if k != 'lp_w'}
         
         # log cdf for recalibrated linear pool
         # log[ G{ \sum_{m=1}^M \pi_m F_{m,i}(y); \theta } ]

@@ -5,16 +5,19 @@ import numpy as np
 import tensorflow as tf
 import unittest
 
-from rclp import util
+from rclp.rclp import BetaMixtureRCLP
 
 
-class Test_Util(unittest.TestCase):
+class Test_HandleMissingness(unittest.TestCase):
   def test_handle_missingness_none_missing(self):
+    rclp = BetaMixtureRCLP(M=1, K=1)
     w = tf.constant([0.1, 0.6, 0.3], dtype = "float32")
+    rclp.parameters = {'lp_w': w}
+    
     log_f = tf.constant(np.linspace(1, 5 * 3, 5 * 3).reshape((5, 3)))
     log_F = tf.constant(5.0 + np.linspace(1, 5 * 3, 5 * 3).reshape((5, 3)))
 
-    result_log_f, result_log_F, result_w = util.handle_missingness(log_f, log_F, w)
+    result_log_f, result_log_F, result_w = rclp.handle_missingness(log_f, log_F)
 
     # 5 copies of the original w
     for i in range(5):
@@ -31,8 +34,11 @@ class Test_Util(unittest.TestCase):
 
 
   def test_handle_missingness_with_missing(self):
+    rclp = BetaMixtureRCLP(M=1, K=1)
     w = tf.constant([0.1, 0.6, 0.3], dtype = "float32")
     w_np = w.numpy()
+    rclp.parameters = {'lp_w': w}
+    
     log_f_np = np.linspace(1, 5 * 3, 5 * 3).reshape((5, 3))
     log_f_np[[0, 3, 3], [1, 1, 2]] = np.nan
     log_f = tf.constant(log_f_np)
@@ -40,7 +46,7 @@ class Test_Util(unittest.TestCase):
     log_F_np[[0, 3, 3], [1, 1, 2]] = np.nan
     log_F = tf.constant(log_F_np)
 
-    result_log_f, result_log_F, result_w = util.handle_missingness(log_f, log_F, w)
+    result_log_f, result_log_F, result_w = rclp.handle_missingness(log_f, log_F)
 
     # entries at indices i with no missingness are copies of the original w
     for i in [1,2,4]:
@@ -58,10 +64,10 @@ class Test_Util(unittest.TestCase):
       np.all(result_w.numpy()[[0, 3, 3], [1, 1, 2]] == np.zeros(3)))
     
     self.assertTrue(
-      np.all(result_log_f.numpy()[[0, 3, 3], [1, 1, 2]] == np.zeros(3)))
+      np.all(result_log_f.numpy()[[0, 3, 3], [1, 1, 2]] == np.full((3,), -np.inf)))
     
     self.assertTrue(
-      np.all(result_log_F.numpy()[[0, 3, 3], [1, 1, 2]] == np.zeros(3)))
+      np.all(result_log_F.numpy()[[0, 3, 3], [1, 1, 2]] == np.full((3,), -np.inf)))
 
     # for rows (i, :) with missingness, entries at non-missing points are
     # proportional to original weights
