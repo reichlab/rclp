@@ -5,7 +5,7 @@ import numpy as np
 import tensorflow as tf
 import unittest
 
-from rclp.rclp import BetaMixtureRCLP
+from rclp import BetaMixtureRCLP
 
 
 class Test_HandleMissingness(unittest.TestCase):
