@@ -91,10 +91,8 @@ class BaseRCLP(abc.ABC):
         Broadcast w to the same shape as component_log_prob, set weights
         corresponding to missing entries of component_log_prob to 0, and
         re-normalize so that the weights sum to 1. Then, replace nans in
-        component_log_prob and component_log_cdf with 0. It is implicitly
-        assumed, but not explicitly checked, that component_log_prob and
-        component_log_cdf have missing values in the same locations.
-
+        component_log_prob and component_log_cdf with -inf.
+        
         Parameters
         ----------
         component_log_prob: 2D tensor with shape (N, M)
@@ -129,7 +127,7 @@ class BaseRCLP(abc.ABC):
         # broadcast w to the same shape as log_f, creating N copies of w
         log_prob_shape = tf.shape(component_log_prob).numpy()
         broadcast_w = tf.broadcast_to(w, log_prob_shape)
-
+        
         # if there is missingness, adjust entries of broadcast_w
         missing_mask = tf.math.is_nan(component_log_prob)
         if tf.reduce_any(missing_mask):
@@ -138,20 +136,20 @@ class BaseRCLP(abc.ABC):
             nonmissing_mask = tf.cast(
                 tf.logical_not(missing_mask),
                 dtype = broadcast_w.dtype)
-
+            
             # set weights corresponding to missing entries of q to 0
             broadcast_w = tf.math.multiply(broadcast_w, nonmissing_mask)
-
+            
             # renormalize weights to sum to 1 along the model axis
             (broadcast_w, _) = tf.linalg.normalize(broadcast_w, ord = 1, axis = -1)
-
-        # replace nan with 0 in log_f and log_F
+        
+        # replace nan with -inf in log_f and log_F
         component_log_prob_nans_replaced = tf.where(missing_mask,
                                                     np.float32(-np.inf),
                                                     np.float32(component_log_prob))
         component_log_cdf_nans_replaced = tf.where(missing_mask,
-                                                np.float32(-np.inf),
-                                                np.float32(component_log_cdf))
+                                                   np.float32(-np.inf),
+                                                   np.float32(component_log_cdf))
         
         return component_log_prob_nans_replaced, component_log_cdf_nans_replaced, broadcast_w
     
@@ -309,7 +307,7 @@ class BaseRCLP(abc.ABC):
         return tf.math.exp(self.log_prob(component_log_prob, component_log_cdf,
                                          validate=validate))
     
-        
+    
     def log_cdf(self, component_log_cdf):
         """
         Log cdf of recalibrated linear pool ensemble
