@@ -13,7 +13,7 @@ class BaseRCLP(abc.ABC):
     Base class for a recalibrated linear pool, with estimation by optimizing
     log score.
     """
-    def __init__(self, M, rc_parameters={}) -> None:
+    def __init__(self, M, rc_parameters={}, init_method = "xavier") -> None:
         """
         Initialize an RCLP model
         
@@ -23,6 +23,8 @@ class BaseRCLP(abc.ABC):
             number of component models
         rc_parameters: dictionary
             parameters for recalibration
+        init_method: string
+            initialization method for linear pool weights: "xavier" or "zero"
         
         Returns
         -------
@@ -30,11 +32,18 @@ class BaseRCLP(abc.ABC):
         """
         softmax_bijector = tfb.SoftmaxCentered()
         
-        # Xavier initialization for w
-        w_xavier_hw = 1.0 / tf.math.sqrt(tf.constant(M-1, dtype=tf.float32))
-        def init_lp_w():
-            return softmax_bijector.forward(
-                tf.random.uniform((M-1,), -w_xavier_hw, w_xavier_hw))
+        if init_method == "xavier":
+            # Xavier initialization for w
+            w_xavier_hw = 1.0 / tf.math.sqrt(tf.constant(M-1, dtype=tf.float32))
+            def init_lp_w():
+                return softmax_bijector.forward(
+                    tf.random.uniform((M-1,), -w_xavier_hw, w_xavier_hw))
+        elif init_method == "zero":
+            # zero initialization for w
+            def init_lp_w():
+                return softmax_bijector.forward(tf.zeros((M-1,)))
+        else:
+            raise ValueError("init_method must be 'xavier' or 'zero'")
         
         rc_parameters.update({
             'lp_w': {
@@ -500,10 +509,10 @@ class BaseRCLP(abc.ABC):
 
 
 
-class LinearPool(BaseRCLP):
+class EqualLP(BaseRCLP):
     def __init__(self, M) -> None:
         """
-        Initialize a LinearPool model
+        Initialize an EqualLP (equally weighted linear pool) model
         
         Parameters
         ----------
@@ -517,7 +526,77 @@ class LinearPool(BaseRCLP):
         if not isinstance(M, int):
             raise ValueError('M must be an int')
         
-        super(LinearPool, self).__init__(M=M, rc_parameters={})
+        super(EqualLP, self).__init__(M=M, rc_parameters={}, init_method = "zero")
+    
+    
+    def fit(self, *args, **kwargs):
+        """
+        Replace the fit method provided by BaseRCLP; no estimation to do for an
+        equally-weighted linear pool
+        """
+    
+    
+    def rc_log_prob(self, lp_log_cdf):
+        """
+        Calculate the log density of a recalibrating transformation for an
+        ensemble forecast. For a linear pool, no recalibration is done. This
+        corresponds to the use of a Uniform(0, 1) distribution with log
+        density that takes the value 0 everywhere.
+        
+        Parameters
+        ----------
+        lp_log_cdf: 1D tensor with length N
+            log cdf values from the linear pool for observation cases i = 1, ..., N
+        
+        Returns
+        -------
+        1D tensor of length N
+            log recalibration density evaluated at the linear pool cdf values
+            for each observation case i = 1, ..., N; all values are 0
+        """
+        return tf.zeros_like(lp_log_cdf)
+    
+    
+    def rc_log_cdf(self, lp_log_cdf):
+        """
+        Calculate the log cdf of a recalibrating transformation for an
+        ensemble forecast. For a linear pool, no recalibration is done. This
+        corresponds to the use of a Uniform(0, 1) distribution with a cdf that
+        is the identity function.
+        
+        Parameters
+        ----------
+        lp_log_cdf: 1D tensor with length N
+            log cdf values from the linear pool for observation cases i = 1, ..., N
+        
+        Returns
+        -------
+        1D tensor of length N
+            log recalibration cdf evaluated at the linear pool cdf values
+            for each observation case i = 1, ..., N
+        """
+        return lp_log_cdf
+
+
+
+class LP(BaseRCLP):
+    def __init__(self, M) -> None:
+        """
+        Initialize a LP (Linear Pool) model
+        
+        Parameters
+        ----------
+        M: integer
+            number of component models
+        
+        Returns
+        -------
+        None
+        """
+        if not isinstance(M, int):
+            raise ValueError('M must be an int')
+        
+        super(LP, self).__init__(M=M, rc_parameters={})
     
     
     def rc_log_prob(self, lp_log_cdf):
@@ -645,7 +724,7 @@ class BetaMixtureRCLP(BaseRCLP):
         """
         # note that we transform lp_cdf away from 0 and 1 to avoid numerical
         # issues at the boundary of the support of the Beta distribution
-        eps = 2.0 * np.finfo(np.float32).eps
+        eps = 0.00001
         lp_cdf = tf.math.exp(lp_log_cdf) * (1.0 - 2.0 * eps) + eps
         return tfd.MixtureSameFamily(
                 mixture_distribution=tfd.Categorical(probs=rc_pi),
@@ -679,7 +758,7 @@ class BetaMixtureRCLP(BaseRCLP):
         """
         # note that we transform lp_cdf away from 0 and 1 to avoid numeric issues
         # at the boundary of the support of the Beta distribution
-        eps = np.finfo(np.float32).eps
+        eps = 0.00001
         lp_cdf = tf.math.exp(lp_log_cdf) * (1.0 - 2.0 * eps) + eps
         return tfd.MixtureSameFamily(
                 mixture_distribution=tfd.Categorical(probs=rc_pi),
