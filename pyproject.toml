@@ -1,0 +1,23 @@
+[project]
+name = "rclp"
+version = "0.1.0"
+description = "Recalibrated linear pools"
+authors = [
+    {name = "Evan Ray", email = "elray@umass.edu"},
+]
+dependencies = [
+    "numpy>=1.26.4",
+    "tensorflow>=2.15.0",
+    "tensorflow-probability>=0.23.0",
+]
+requires-python = ">=3.10,<3.11"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+[tool.pdm]
+distribution = true
