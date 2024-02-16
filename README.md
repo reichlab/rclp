@@ -6,3 +6,8 @@ To install, run
 ```
 pip3 install git+https://github.com/reichlab/rclp.git
 ````
+
+To install rclp plus the additional dependencies required to run the `demo.ipynb` notebook:
+```
+pip3 install "rclp[demo] @ git+https://github.com/reichlab/rclp.git"
+```
